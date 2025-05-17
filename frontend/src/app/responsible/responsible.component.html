@@ -1,1 +1,13 @@
-<p>responsible works!</p>
+<div class="responsible-box">
+  <p>Enter Responsible Email and Message</p>
+  <div class="responsible-container">
+    <div class="email-box">
+      <input type="email" [(ngModel)]="email" placeholder="Enter email" required>
+    </div>
+    <div class="message-box">
+      <textarea [(ngModel)]="message" placeholder="Enter message"></textarea>
+    </div>
+  </div>
+  <button (click)="validateInputs()">Send</button>
+</div>
+

@@ -1,1 +1,5 @@
-<p>guide works!</p>
+<div class="guide-container">
+  <div *ngFor="let image of images" class="image-container">
+    <img [src]="image" alt="Guide Image">
+  </div>
+</div>
