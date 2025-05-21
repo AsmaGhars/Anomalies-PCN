@@ -1,6 +1,6 @@
 import os
 import time
-from config import TEMP_DIR, DELETE_INTERVAL
+from backend.config import TEMP_DIR, DELETE_INTERVAL
 
 def delete_temp_files():
     while True:

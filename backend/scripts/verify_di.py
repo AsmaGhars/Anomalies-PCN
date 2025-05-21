@@ -1,6 +1,9 @@
 import geopandas as gpd
 from shapely.geometry import  LineString
 from shapely import wkt
+import matplotlib.pyplot as plt
+
+from ..metrics import *
 
 def convert_geometries_to_wkt(gdf):
     gdf['wkt'] = gdf['geometry'].apply(lambda geom: wkt.dumps(geom))
@@ -16,8 +19,10 @@ async def verify_cb_capafo(cb_gdf, support_gdf):
         
         if has_support and cb_row['cb_capafo'] > 144:
             invalid_cb_capafo.append(cb_row['cl_codeext'])
+            CB_CAPAFO_EXCESS.labels(cl_codeext=cb_row['cl_codeext']).set(cb_row['cb_capafo'])
 
     if invalid_cb_capafo:
+        ANOMALY_COUNT.inc(len(invalid_cb_capafo))
         print("Les CB aeriens doivent avoir une capacité max de 144 FO:")
         for cb in invalid_cb_capafo:
             print(f"- {cb}")
@@ -25,12 +30,22 @@ async def verify_cb_capafo(cb_gdf, support_gdf):
     return invalid_cb_capafo
 
 async def verify_mic_pa(zpa_gdf):
-    try:        
-        pa_invalid = zpa_gdf[zpa_gdf['pcn_umftth'] > 20]
-        if not pa_invalid.empty:
-            print(f"Vous avez dépassez le nombre de  µm maximale par PA (20 µm) :{pa_invalid['pcn_code'].tolist()}")
-    except Exception as e:
-        print(f"Erreur lors de la vérification des longueurs : {e}")
+
+    invalid_pas = []
+    pa_invalid = zpa_gdf[zpa_gdf['pcn_umftth'] > 20]
+    
+    for _, row in pa_invalid.iterrows():
+        code = row['pcn_code']
+        um_value = row['pcn_umftth']
+        PA_UMFTTH_EXCESS.labels(pcn_code=code).set(um_value)
+        invalid_pas.append((code, um_value))
+    if invalid_pas:
+        ANOMALY_COUNT.inc(len(invalid_pas))
+        print("PAs dépassant 20 µm FTTH par PA :")
+        for code, um_value in invalid_pas:
+            print(f"- {code} : {um_value} µm")
+    
+    return invalid_pas
 
 async def verify_long_connections(cm_di_gdf):
     try:
@@ -38,36 +53,66 @@ async def verify_long_connections(cm_di_gdf):
         total_connections = len(cm_di_gdf)
         long_connections_count = len(long_connections)
         long_connections_percentage = (long_connections_count / total_connections) * 100
+        LONG_CONN_PERCENT.set(long_connections_percentage)
         if long_connections_percentage > 5:
             print(f"Le pourcentage de raccordements longs dépasse 5%: {long_connections_percentage:.2f}%")
+            ANOMALY_COUNT.inc(1)
         long_connections_cm = cm_di_gdf[cm_di_gdf['cm_long'] > 500]
-        long_connections_count_cm = len(long_connections_cm)
-        if long_connections_count_cm > 0:
-            print(f"{long_connections_count_cm} raccordement(s) CM dépasse(nt) 500 mètres:")
-            print(long_connections_cm['cm_codeext'].tolist())
+        if len(long_connections_cm) > 0:
+            ANOMALY_COUNT.inc(len(long_connections_cm))
+            print(f"{len(long_connections_cm)} raccordement(s) CM dépasse(nt) 500 mètres:")
+            for _, row in long_connections_cm.iterrows():
+                code = row['cm_codeext']
+                longueur = row['cm_long']
+                LONG_CONN_CM_LENGTH.labels(cm_codeext=code).set(longueur)
+                print(f" • {code} : {longueur:.1f} m")
     except Exception as e:
         print(f"Erreur lors de la vérification des raccordements longs : {e}")
 
 async def verify_length_D1(cb_di_gdf):
+    invalid_cbs = []
     try:
         cb_filtered = cb_di_gdf[cb_di_gdf['cl_codeext'].str.contains('D1', na=False)]
         matching_cb = cb_filtered[cb_filtered['cb_long'] > 2100]
-        if not matching_cb.empty:
-            print(f"Intégrez un joint droit au niveau de(s) CB(s) dépassant 2100 m :\n{matching_cb['cl_codeext'].tolist()}")
+
+        for _, row in matching_cb.iterrows():
+            code = row['cl_codeext']
+            length = row['cb_long']
+            CB_D1_LENGTH_EXCESS.labels(cl_codeext=code).set(length)
+            invalid_cbs.append((code, length))
+
+        if invalid_cbs:
+            ANOMALY_COUNT.inc(len(invalid_cbs))
+            print("CB D1 dépassant 2100 m :")
+            for code, length in invalid_cbs:
+                print(f"- {code} : {length} m")
+
     except Exception as e:
         print(f"Erreur lors de la vérification des longueurs : {e}")
 
-async def verify_no_overlap(pa_gdf, support_gdf):
+    return invalid_cbs
+
+async def verify_no_overlap(pa_gdf: gpd.GeoDataFrame, support_gdf: gpd.GeoDataFrame):
+  
+    invalid = []
     try:
-        enedis_support = support_gdf[support_gdf['pt_prop'] == 'ENEDIS']
-        
-        overlaps = gpd.overlay(pa_gdf, enedis_support, how='intersection')
-        
-        if not overlaps.empty:
-            print(f"Interdit d'avoir des PA sur des appuis ENEDIS : {overlaps['pcn_code'].tolist()}")  
-    
+        enedis = support_gdf[support_gdf['pt_prop'].str.upper() == 'ENEDIS']
+        overlaps = gpd.overlay(pa_gdf, enedis, how='intersection')
+
+        for _, row in overlaps.iterrows():
+            code = row['pcn_code']
+            PA_ON_ENEDIS_SUPPORT.labels(pcn_code=code).set(1)
+            invalid.append(code)
+
+        if invalid:
+            ANOMALY_COUNT.inc(len(invalid))
+            print(f"Interdit d'avoir des PA sur des appuis ENEDIS : {invalid}")
+
     except Exception as e:
         print(f"Erreur lors de la vérification de la superposition : {e}")
+
+    return invalid
+
 
 async def verify_zpb_in_zonepa(zpbo_gdf, zpa_gdf):
     if zpbo_gdf.crs != zpa_gdf.crs:

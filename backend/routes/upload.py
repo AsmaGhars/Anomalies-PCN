@@ -1,11 +1,11 @@
 from flask import Blueprint, request, jsonify
 import os
-from config import TEMP_DIR
-from scripts.extract_zip import extract_zip
-from scripts.load_data import load_data
-from find_shapefiles import find_shapefiles
-from scripts.verify_di import *
-from scripts.verify import *
+from backend.config import TEMP_DIR
+from backend.scripts.extract_zip import extract_zip
+from backend.scripts.load_data import load_data
+from backend.find_shapefiles import find_shapefiles
+from backend.scripts.verify_di import *
+from backend.scripts.verify import *
 import aiofiles
 
 upload_blueprint = Blueprint('upload', __name__)

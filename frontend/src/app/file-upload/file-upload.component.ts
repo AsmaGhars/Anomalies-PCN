@@ -73,7 +73,7 @@ export class FileUploadComponent {
           console.log(data);
           this.uploadMessage = 'File uploaded and analyzed successfully!';
           this.isLoading = false;
-          this.router.navigate(['/dashboard']);
+          window.location.href = 'http://localhost:3000/d/f7ea2867-cf23-4994-bf13-e4adcfc96234/new-dashboard?orgId=1&from=now-6h&to=now&timezone=browser';
         })
         .catch(error => {
           console.error('Error:', error);
