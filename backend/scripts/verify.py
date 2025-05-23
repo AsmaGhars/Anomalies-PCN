@@ -6,6 +6,7 @@ import re
 import json
 
 from ..metrics import *
+
 def convert_geometries_to_wkt(gdf):
     gdf['wkt'] = gdf['geometry'].apply(lambda geom: wkt.dumps(geom))
     return gdf
@@ -89,31 +90,28 @@ async def verify_zsro_in_zonenro(zsro_gdf, znro_gdf):
     if zsro_gdf.crs != znro_gdf.crs:
         zsro_gdf = zsro_gdf.to_crs(znro_gdf.crs)
 
-    zsro_gdf = convert_geometries_to_wkt(zsro_gdf)
-    znro_gdf = convert_geometries_to_wkt(znro_gdf)
+    znro_geom = znro_gdf.iloc[0]['geometry']
 
-    znro_dict = {row['zn_r3_code']: wkt.loads(row['wkt']) for idx, row in znro_gdf.iterrows()}
-
+    zsro_in_zones = []
     zsro_not_in_zones = []
 
     for idx, row in zsro_gdf.iterrows():
-        zsro_geom = wkt.loads(row['wkt'])
+        zsro_geom = row['geometry']
         zs_code = row['zs_code']
-        znro_geom = znro_dict.get(row['zs_r3_code'])
 
-        if znro_geom:
-            intersection = znro_geom.intersection(zsro_geom)
-            if not intersection.equals(zsro_geom):
-                zsro_not_in_zones.append(zs_code)
+        if znro_geom.contains(zsro_geom):
+            zsro_in_zones.append(zs_code)
         else:
             zsro_not_in_zones.append(zs_code)
+            ZSRO_NOT_IN_ZNRO.labels(zone_type='ZSRO', code=zs_code).set(1)
 
     if zsro_not_in_zones:
+        print("Les ZSRO suivants n'appartiennent pas entièrement à la zone ZNRO assignée :")
+        print(zsro_not_in_zones)
         ANOMALY_COUNT.inc(len(zsro_not_in_zones))
-        print("ZSRO n'appartiennent pas aux ZNRO assignées:")
-        for zsro in zsro_not_in_zones:
-            print(f"- {zsro}")
-    return zsro_not_in_zones
+
+
+    return zsro_in_zones, zsro_not_in_zones
 
 async def detect_self_intersections_c(c_gdf, type):
     if c_gdf.crs is None:
@@ -180,13 +178,22 @@ async def verify_c_intersections(c_di_gdf, support_gdf, pb_gdf, pa_gdf, sro_gdf,
     return intersecting_c
 
 async def verify_mic_pm(zsro_gdf):
-    try:        
-        sro_nv = zsro_gdf[zsro_gdf['pcn_umtot'] > 90]
-        if not sro_nv.empty:
-            ANOMALY_COUNT.inc(len(sro_nv))
-            print(f"Vous avez dépassé le nombre de  µm maximale par PM (90 µm)")
-    except Exception as e:
-        print(f"Erreur lors de la vérification des longueurs : {e}")
+
+    invalid_pms = []
+    pm_invalid = zsro_gdf[zsro_gdf['pcn_umtot'] > 90]
+    
+    for _, row in pm_invalid.iterrows():
+        code = row['zs_code']
+        um_value = row['pcn_umtot']
+        SRO_UMTOT_EXCESS.labels(zs_code=code).set(um_value)
+        invalid_pms.append((code, um_value))
+    if invalid_pms:
+        ANOMALY_COUNT.inc(len(invalid_pms))
+        print("PMs dépassant 90 µm FTTH par PM :")
+        for code, um_value in invalid_pms:
+            print(f"- {code} : {um_value} µm")
+    
+    return invalid_pms
 
 async def detect_cb_without_cm(cb_di_gdf, cm_di_gdf, support_gdf, pb_gdf, pa_gdf, sro_gdf):
     if cb_di_gdf.crs != cm_di_gdf.crs:
@@ -241,6 +248,8 @@ async def check_column_duplicates(data, column_name, file_key):
     if not duplicates.empty:
         ANOMALY_COUNT.inc(len(duplicates))
         unique_duplicates = set(duplicates[column_name].tolist())
+        for value in unique_duplicates:
+            DUPLICATE_COUNT.labels(file_key=file_key, column_name=column_name, duplicate_value=value).set(len(duplicates[duplicates[column_name] == value]))
         print(f"Doublons trouvés dans le fichier {file_key} pour la colonne {column_name}:")
         print(list(unique_duplicates))
 
@@ -336,7 +345,6 @@ async def verify_nd_code(gdf, table_type):
     missing_nd_code = gdf['nd_code'].isna() | (gdf['nd_code'] == '')
     
     if missing_nd_code.any():
-        ANOMALY_COUNT.inc(missing_nd_code.sum())
         print(f"La colonne nd_code n'est pas remplie dans la table attributaire de {table_type}")
         return True
     else:
@@ -346,7 +354,6 @@ async def verify_nd_r3_code(nro_gdf):
     missing_nd_r3_code = nro_gdf['nd_r3_code'].isna() | (nro_gdf['nd_r3_code'] == '')
     
     if missing_nd_r3_code.any():
-        ANOMALY_COUNT.inc(missing_nd_r3_code.sum())
         print("La colonne nd_r3_code n'est pas remplie dans la table attributaire de NRO")
         return True
     else:
@@ -358,7 +365,6 @@ async def verify_zn_code(znro_gdf):
     missing_nd_code = znro_gdf['zn_code'].isna() | (znro_gdf['zn_code'] == '')
     
     if missing_nd_code.any():
-        ANOMALY_COUNT.inc(missing_nd_code.sum())
         print("La colonne zn_code n'est pas remplie dans la table attributaire de ZNRO")
         return True
     else:
@@ -367,7 +373,6 @@ async def verify_zn_code(znro_gdf):
 async def verify_zn_nd_code(znro_gdf, nro_gdf):
     missing_mask = znro_gdf['zn_nd_code'].isna() | (znro_gdf['zn_nd_code'] == '') 
     if missing_mask.any():
-        ANOMALY_COUNT.inc(missing_mask.sum())
         print(" La colonne 'zn_nd_code' contient des valeurs manquantes dans la table ZNRO")
 
     valid_codes = set(nro_gdf['nd_code'].dropna().unique())
@@ -377,7 +382,6 @@ async def verify_zn_nd_code(znro_gdf, nro_gdf):
     invalid_codes = znro_gdf.loc[mismatch_mask, 'zn_nd_code'].tolist()
 
     if invalid_codes:
-        ANOMALY_COUNT.inc(len(invalid_codes))
         print("Les ZNRO suivants ont un 'zn_nd_code' non trouvé dans la table NRO :")
         for code in invalid_codes:
             print(f"  - {code}")
@@ -388,7 +392,6 @@ async def verify_zn_r1_code(znro_gdf):
     missing_zn_r1_code = znro_gdf['zn_r1_code'].isna() | (znro_gdf['zn_r1_code'] == '')
     
     if missing_zn_r1_code.any():
-        ANOMALY_COUNT.inc(missing_zn_r1_code.sum())
         print("La colonne zn_r1_code n'est pas remplie dans la table attributaire de ZNRO")
         return True
     else:
@@ -398,7 +401,6 @@ async def verify_zn_r2_code(znro_gdf):
     missing_zn_r2_code = znro_gdf['zn_r2_code'].isna() | (znro_gdf['zn_r2_code'] == '')
     
     if missing_zn_r2_code.any():
-        ANOMALY_COUNT.inc(missing_zn_r2_code.sum())
         print("La colonne zn_r2_code n'est pas remplie dans la table attributaire de ZNRO")
         return True
     else:
@@ -407,7 +409,6 @@ async def verify_zn_r2_code(znro_gdf):
 async def verify_zn_r3_code(znro_gdf, nro_gdf):
     missing_mask = znro_gdf['zn_r3_code'].isna() | (znro_gdf['zn_r3_code'] == '') 
     if missing_mask.any():
-        ANOMALY_COUNT.inc(missing_mask.sum())
         print(" La colonne 'zn_r3_code' contient des valeurs manquantes dans la table ZNRO")
 
     valid_codes = set(nro_gdf['nd_r3_code'].dropna().unique())
@@ -417,7 +418,6 @@ async def verify_zn_r3_code(znro_gdf, nro_gdf):
     invalid_codes = znro_gdf.loc[mismatch_mask, 'zn_r3_code'].tolist()
 
     if invalid_codes:
-        ANOMALY_COUNT.inc(len(invalid_codes))
         print("Les ZNRO suivants ont un 'zn_r3_code' non trouvé dans la table NRO :")
         for code in invalid_codes:
             print(f"  - {code}")
@@ -430,7 +430,6 @@ async def verify_zn_nroref(znro_gdf):
 
     missing_mask = znro_gdf['zn_nroref'].isna() | (znro_gdf['zn_nroref'] == '')
     if missing_mask.any():
-        ANOMALY_COUNT.inc(missing_mask.sum())
         print("La colonne 'zn_nroref' contient des valeurs manquantes ou vides dans ZNRO")
 
     pattern = re.compile(r'^\d{5}/NRO/[A-Z]{3}$')
@@ -438,7 +437,6 @@ async def verify_zn_nroref(znro_gdf):
     invalid = [(idx, val) 
                for idx, val in zip(znro_gdf.index[bad_format_mask], znro_gdf.loc[bad_format_mask, 'zn_nroref'])]
     if invalid:
-        ANOMALY_COUNT.inc(len(invalid))
         print("La ZNRO a un 'zn_nroref' mal formé (attendu '12345/NRO/ABC') :")
     return invalid
 
@@ -448,7 +446,6 @@ async def verify_nd_r4_code(sro_gdf):
     missing_nd_r4_code = sro_gdf['nd_r4_code'].isna() | (sro_gdf['nd_r4_code'] == '')
     
     if missing_nd_r4_code.any():
-        ANOMALY_COUNT.inc(missing_nd_r4_code.sum())
         print("La colonne nd_r4_code n'est pas remplie dans la table attributaire de SRO")
         return True
     else:
@@ -464,7 +461,6 @@ async def verify_pcn_cb_ent_sro(sro_gdf, adresse_gdf):
     expected_pcn_cb_ent = min([val for val in possible_values if val >= calculated_value], default=None)
     
     if expected_pcn_cb_ent is None:
-        ANOMALY_COUNT.inc(1)
         print("Aucune valeur valide trouvée pour pcn_cb_ent.")
         return True
     
@@ -487,7 +483,6 @@ async def verify_zs_code(zsro_gdf):
     missing_zs_code = zsro_gdf['zs_code'].isna() | (zsro_gdf['zs_code'] == '')
     
     if missing_zs_code.any():
-        ANOMALY_COUNT.inc(missing_zs_code.sum()) 
         print("La colonne zs_code n'est pas remplie dans la table attributaire de ZSRO")
         return True
     else:
@@ -496,7 +491,6 @@ async def verify_zs_code(zsro_gdf):
 async def verify_zs_nd_code(zsro_gdf, sro_gdf):
     missing_mask = zsro_gdf['zs_nd_code'].isna() | (zsro_gdf['zs_nd_code'] == '') 
     if missing_mask.any():
-        ANOMALY_COUNT.inc(missing_mask.sum())
         print(" La colonne 'zs_nd_code' est vide dans la table ZSRO")
 
     valid_codes = set(sro_gdf['nd_code'].dropna().unique())
@@ -506,7 +500,6 @@ async def verify_zs_nd_code(zsro_gdf, sro_gdf):
     invalid_codes = zsro_gdf.loc[mismatch_mask, 'zs_nd_code'].tolist()
 
     if invalid_codes:
-        ANOMALY_COUNT.inc(len(invalid_codes))
         print("La ZSRO a un 'zn_r3_code' non compatible avec 'nd_code' de la table SRO :")
         for code in invalid_codes:
             print(f"  - {code}")
@@ -516,7 +509,6 @@ async def verify_zs_nd_code(zsro_gdf, sro_gdf):
 async def verify_zs_zn_code(zsro_gdf, znro_gdf):
     missing_mask = zsro_gdf['zs_zn_code'].isna() | (zsro_gdf['zs_zn_code'] == '') 
     if missing_mask.any():
-        ANOMALY_COUNT.inc(missing_mask.sum())
         print(" La colonne 'zs_zn_code' est vide dans la table ZSRO")
 
     valid_codes = set(znro_gdf['zn_code'].dropna().unique())
@@ -526,7 +518,6 @@ async def verify_zs_zn_code(zsro_gdf, znro_gdf):
     invalid_codes = zsro_gdf.loc[mismatch_mask, 'zs_zn_code'].tolist()
 
     if invalid_codes:
-        ANOMALY_COUNT.inc(len(invalid_codes))
         print("La ZSRO a un 'zs_zn_code' non compatible avec 'zn_code' de la table ZNRO :")
         for code in invalid_codes:
             print(f"  - {code}")
@@ -536,7 +527,6 @@ async def verify_zs_zn_code(zsro_gdf, znro_gdf):
 async def verify_zs_r1_code(zsro_gdf, znro_gdf):
     missing_mask = zsro_gdf['zs_r1_code'].isna() | (zsro_gdf['zs_r1_code'] == '') 
     if missing_mask.any():
-        ANOMALY_COUNT.inc(missing_mask.sum())
         print(" La colonne 'zs_r1_code' est vide dans la table ZSRO")
 
     valid_codes = set(znro_gdf['zn_r1_code'].dropna().unique())
@@ -546,7 +536,6 @@ async def verify_zs_r1_code(zsro_gdf, znro_gdf):
     invalid_codes = zsro_gdf.loc[mismatch_mask, 'zs_r1_code'].tolist()
 
     if invalid_codes:
-        ANOMALY_COUNT.inc(len(invalid_codes))
         print("La ZSRO a un 'zs_r1_code' non compatible avec 'zn_r1_code' de la table ZNRO :")
         for code in invalid_codes:
             print(f"  - {code}")
@@ -556,7 +545,6 @@ async def verify_zs_r1_code(zsro_gdf, znro_gdf):
 async def verify_zs_r2_code(zsro_gdf, znro_gdf):
     missing_mask = zsro_gdf['zs_r2_code'].isna() | (zsro_gdf['zs_r2_code'] == '') 
     if missing_mask.any():
-        ANOMALY_COUNT.inc(missing_mask.sum())
         print(" La colonne 'zs_r2_code' est vide dans la table ZSRO")
 
     valid_codes = set(znro_gdf['zn_r2_code'].dropna().unique())
@@ -566,7 +554,6 @@ async def verify_zs_r2_code(zsro_gdf, znro_gdf):
     invalid_codes = zsro_gdf.loc[mismatch_mask, 'zs_r2_code'].tolist()
 
     if invalid_codes:
-        ANOMALY_COUNT.inc(len(invalid_codes))
         print("La ZSRO a un 'zs_r2_code' non compatible avec 'zn_r2_code' de la table ZNRO :")
         for code in invalid_codes:
             print(f"  - {code}")
@@ -576,7 +563,6 @@ async def verify_zs_r2_code(zsro_gdf, znro_gdf):
 async def verify_zs_r3_code(zsro_gdf, znro_gdf):
     missing_mask = zsro_gdf['zs_r3_code'].isna() | (zsro_gdf['zs_r3_code'] == '') 
     if missing_mask.any():
-        ANOMALY_COUNT.inc(missing_mask.sum())
         print(" La colonne 'zs_r3_code' est vide dans la table ZSRO")
 
     valid_codes = set(znro_gdf['zn_r3_code'].dropna().unique())
@@ -586,7 +572,6 @@ async def verify_zs_r3_code(zsro_gdf, znro_gdf):
     invalid_codes = zsro_gdf.loc[mismatch_mask, 'zs_r3_code'].tolist()
 
     if invalid_codes:
-        ANOMALY_COUNT.inc(len(invalid_codes))
         print("La ZSRO a un 'zs_r3_code' non compatible avec 'zn_r3_code' de la table ZNRO :")
         for code in invalid_codes:
             print(f"  - {code}")
@@ -596,14 +581,12 @@ async def verify_zs_r3_code(zsro_gdf, znro_gdf):
 async def verify_zs_r4_code(zsro_gdf, sro_gdf):
     missing_mask = zsro_gdf['zs_r4_code'].isna() | (zsro_gdf['zs_r4_code'] == '') 
     if missing_mask.any():
-        ANOMALY_COUNT.inc(missing_mask.sum())
         print(" La colonne 'zs_r4_code' est vide dans la table ZSRO")
     valid_codes = set(sro_gdf['nd_r4_code'].dropna().unique())
     mismatch_mask = (~zsro_gdf['zs_r4_code'].isin(valid_codes)) & (~missing_mask)  
     invalid_codes = zsro_gdf.loc[mismatch_mask, 'zs_r4_code'].tolist()
 
     if invalid_codes:
-        ANOMALY_COUNT.inc(len(invalid_codes))
         print("La ZSRO a un 'zs_r4_code' non compatible avec 'zn_r4_code' de la table SRO:")
         for code in invalid_codes:
             print(f"  - {code}")
@@ -614,7 +597,6 @@ async def verify_zs_refpm(zsro_gdf):
     missing_zs_refpm = zsro_gdf['zs_refpm'].isna() | (zsro_gdf['zs_refpm'] == '')
     
     if missing_zs_refpm.any():
-        ANOMALY_COUNT.inc(missing_zs_refpm.sum())
         print("La colonne 'zs_refpm' n'est pas remplie dans la table attributaire de ZSRO")
         return True
     else:

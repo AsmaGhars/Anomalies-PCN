@@ -3,6 +3,7 @@ from flask_cors import CORS
 import threading
 from backend.delete_temp_files import delete_temp_files
 from backend.routes.upload import upload_blueprint
+from prometheus_client import start_http_server
 
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
@@ -22,5 +23,5 @@ def metrics():
 threading.Thread(target=delete_temp_files, daemon=True).start()
 
 if __name__ == "__main__":
+    start_http_server(8000)
     app.run(debug=True, use_reloader=False, port=5000)
-

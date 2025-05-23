@@ -7,11 +7,14 @@ from backend.find_shapefiles import find_shapefiles
 from backend.scripts.verify_di import *
 from backend.scripts.verify import *
 import aiofiles
+from ..metrics import *
+
 
 upload_blueprint = Blueprint('upload', __name__)
 
 @upload_blueprint.route('/upload', methods=['POST'])
 async def upload_file():
+    reset_metrics()
     if 'file' not in request.files or 'choice' not in request.form or 'email' not in request.form or 'message' not in request.form:
         return jsonify({"error": "Missing file, choice, email, or message part"}), 400
     
@@ -147,7 +150,7 @@ async def upload_file():
         # invalid_zs_capamax = verify_zs_capamax(zsro_gdf)
         # invalid_pcn_ftte_zsro = verify_pcn_ftte_zsro(zsro_gdf, adresse_gdf)
         # invalid_pcn_umtot_zsro = verify_pcn_umtot_zsro(zsro_gdf, pb_gdf)
-        # invalid_pcn_code_zpa = verify_pcn_code_zpa(zpa_gdf)
+        # invalid_pcn_code_zpa = await verify_pcn_code_zpa(zpa_gdf)
         # invalid_pcn_capa_zpa = verify_pcn_capa_zpa(zpa_gdf, cb_gdf)
         # invalid_pcn_ftth_zpa = verify_pcn_ftth_zpa(zpa_gdf, adresse_gdf)
         # invalid_pcn_umftth_zpa = verify_pcn_umftth_zpa(zpa_gdf, pb_gdf)
@@ -158,8 +161,8 @@ async def upload_file():
         # invalid_pcn_umtot_zpa = verify_pcn_umtot_zpa(zpa_gdf)
         # invalid_pcn_sro_zpa = verify_pcn_sro(zpa_gdf, zsro_gdf, 'ZPA')
         # invalid_pcn_sro_pa = verify_pcn_sro(pa_gdf, zsro_gdf, 'PA')
-        # invalid_pcn_code_pa = verify_pcn_code_pa(pa_gdf, zpa_gdf)
-        # invalid_pcn_cb_ent_pa = verify_pcn_cb_ent_pa(pa_gdf, cb_gdf)
+        invalid_pcn_code_pa = await verify_pcn_code_pa(pa_gdf, zpa_gdf)
+        invalid_pcn_cb_ent_pa = await verify_pcn_cb_ent_pa(pa_gdf, cb_gdf)
         # invalid_pcn_code_pb = verify_pcn_code_pb(pb_gdf)
         # invalid_PB_pcn_pbtyp= verify_PB_pcn_pbtyp(pb_gdf)
         # invalid_pcn_ftth = verify_pcn_ftth(zpa_gdf, pb_gdf, zpbo_gdf, zsro_gdf, adresse_gdf)
@@ -231,8 +234,9 @@ async def upload_file():
             # "invalid_pcn_umtot_zpa": invalid_pcn_umtot_zpa,
             # "invalid_pcn_sro_zpa": invalid_pcn_sro_zpa,
             # "invalid_pcn_sro_pa": invalid_pcn_sro_pa,
-            # "invalid_pcn_code_pa": invalid_pcn_code_pa,
-            # "invalid_pcn_cb_ent_pa": invalid_pcn_cb_ent_pa,
+            "invalid_pcn_code_pa": invalid_pcn_code_pa,
+            "invalid_pcn_cb_ent_pa": invalid_pcn_cb_ent_pa,
+            # "invalid_pcn_code_zpa": invalid_pcn_code_zpa,
             # "invalid_pcn_code_pb": invalid_pcn_code_pb,
             # "invalid_PB_pcn_pbtyp": invalid_PB_pcn_pbtyp,
             # "invalid_pcn_ftth": invalid_pcn_ftth,
@@ -298,7 +302,6 @@ async def upload_file():
         # invalid_zs_capamax = verify_zs_capamax(zsro_gdf)
         # invalid_pcn_ftte_zsro = verify_pcn_ftte_zsro(zsro_gdf, adresse_gdf)
         # invalid_pcn_umtot_zsro = verify_pcn_umtot_zsro(zsro_gdf, pb_gdf)
-        # invalid_pcn_code_zpa = verify_pcn_code_zpa(zpa_gdf)
         # invalid_pcn_capa_zpa = verify_pcn_capa_zpa(zpa_gdf, cb_gdf)
         # invalid_pcn_ftth_zpa = verify_pcn_ftth_zpa(zpa_gdf, adresse_gdf)
         # invalid_pcn_umftth_zpa = verify_pcn_umftth_zpa(zpa_gdf, pb_gdf)
@@ -309,8 +312,6 @@ async def upload_file():
         # invalid_pcn_umtot_zpa = verify_pcn_umtot_zpa(zpa_gdf)
         # invalid_pcn_sro_zpa = verify_pcn_sro(zpa_gdf, zsro_gdf, 'ZPA')
         # invalid_pcn_sro_pa = verify_pcn_sro(pa_gdf, zsro_gdf, 'PA')
-        # invalid_pcn_code_pa = verify_pcn_code_pa(pa_gdf, zpa_gdf)
-        # invalid_pcn_cb_ent_pa = verify_pcn_cb_ent_pa(pa_gdf, cb_gdf)
         # invalid_pcn_code_pb = verify_pcn_code_pb(pb_gdf)
         # invalid_PB_pcn_pbtyp= verify_PB_pcn_pbtyp(pb_gdf)
         # invalid_pcn_ftth = verify_pcn_ftth(zpa_gdf, pb_gdf, zpbo_gdf, zsro_gdf, adresse_gdf)
@@ -369,8 +370,6 @@ async def upload_file():
             # "invalid_pcn_umtot_zpa": invalid_pcn_umtot_zpa,
             # "invalid_pcn_sro_zpa": invalid_pcn_sro_zpa,
             # "invalid_pcn_sro_pa": invalid_pcn_sro_pa,
-            # "invalid_pcn_code_pa": invalid_pcn_code_pa,
-            # "invalid_pcn_cb_ent_pa": invalid_pcn_cb_ent_pa,
             # "invalid_pcn_code_pb": invalid_pcn_code_pb,
             # "invalid_PB_pcn_pbtyp": invalid_PB_pcn_pbtyp,
             # "invalid_pcn_ftth": invalid_pcn_ftth,
@@ -386,4 +385,3 @@ async def upload_file():
         })
     else:
         return jsonify({"error": "Invalid choice"}), 400
-

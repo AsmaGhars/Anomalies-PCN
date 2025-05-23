@@ -1,9 +1,32 @@
 import geopandas as gpd
 from shapely.geometry import  LineString
 from shapely import wkt
-import matplotlib.pyplot as plt
-
+import pandas as pd
+import re
 from ..metrics import *
+def reset_metrics():
+    print("Resetting all metrics...") 
+    ANOMALY_COUNT.set(0)
+    MISSING_PCN_CODE_PA.set(0)
+    MISSING_PCN_CB_ENT_PA.set(0)
+    DUPLICATE_COUNT.clear()
+    NOT_IN_ZONE.clear()
+    LONG_CONN_PERCENT.set(0)
+    LONG_CONN_CM_LENGTH.clear()
+    CB_CAPAFO_EXCESS.clear()
+    PA_UMFTTH_EXCESS.clear()
+    SRO_UMTOT_EXCESS.clear()
+    CB_D1_LENGTH_EXCESS.clear()
+    PA_ON_ENEDIS_SUPPORT.clear()
+    ZPBO_NOT_IN_ZPA.clear()
+    SUPPORT_DISTANCE_EXCEEDING_MAX.clear()
+    ZPA_NOT_IN_ZSRO.clear()
+    ZSRO_NOT_IN_ZNRO.clear()
+    PBR_EL_EXCESS.clear()
+    PB_SINGLE_EL.clear()
+    INVALID_PCN_CODE_PA.clear()
+    INVALID_PCN_CB_ENT_PA.clear()
+    print("done")
 
 def convert_geometries_to_wkt(gdf):
     gdf['wkt'] = gdf['geometry'].apply(lambda geom: wkt.dumps(geom))
@@ -113,7 +136,6 @@ async def verify_no_overlap(pa_gdf: gpd.GeoDataFrame, support_gdf: gpd.GeoDataFr
 
     return invalid
 
-
 async def verify_zpb_in_zonepa(zpbo_gdf, zpa_gdf):
     if zpbo_gdf.crs != zpa_gdf.crs:
         zpbo_gdf = zpbo_gdf.to_crs(zpa_gdf.crs)
@@ -133,16 +155,17 @@ async def verify_zpb_in_zonepa(zpbo_gdf, zpa_gdf):
         if zpa_geom and zpa_geom.contains(zpb_geom):
             zpb_in_zones.append(pcn_code)
         else:
-            zpb_not_in_zones.append( pcn_code)
+            zpb_not_in_zones.append(pcn_code)
+            ZPBO_NOT_IN_ZPA.labels(zone_type='ZPA', code=pcn_code).set(1)
 
     if zpb_not_in_zones:
         print("Les ZPBO suivants n'appartiennent pas à leurs ZPA assignées :")
         print(zpb_not_in_zones)
-
+        ANOMALY_COUNT.inc(len(zpb_not_in_zones))
 
     return zpb_in_zones, zpb_not_in_zones
 
-async def verify_max_distance_between_supports(cm_gdf, support_gdf, max_distance=42):
+async def verify_max_distance_between_supports(cm_gdf, support_gdf, max_distance=40):
     if cm_gdf.crs != support_gdf.crs:
         support_gdf = support_gdf.to_crs(cm_gdf.crs)
 
@@ -173,7 +196,11 @@ async def verify_max_distance_between_supports(cm_gdf, support_gdf, max_distance
             if other_supports_between.empty:
                 if distance > max_distance:
                     support_distances_exceeding_max.append((start_support_code, end_support_code, distance))
+                    SUPPORT_DISTANCE_EXCEEDING_MAX.labels(start_support_code=start_support_code, end_support_code=end_support_code).set(distance)
                     print(f"La distance entre les supports {start_support_code} et {end_support_code} dépasse {max_distance} mètres : {distance:.2f} mètres")
+
+    if support_distances_exceeding_max:
+        ANOMALY_COUNT.inc(len(support_distances_exceeding_max))
 
     return support_distances_exceeding_max
 
@@ -194,11 +221,13 @@ async def verify_zpa_in_zonesro(zpa_gdf, zsro_gdf):
             zpa_in_zones.append(pcn_code)
         else:
             zpa_not_in_zones.append(pcn_code)
+            ZPA_NOT_IN_ZSRO.labels(zone_type='ZPA', code=pcn_code).set(1)
 
     if zpa_not_in_zones:
         print("Les ZPA suivants n'appartiennent pas entièrement à la zone ZSRO assignée :")
-        for pcn_code in zpa_not_in_zones:
-            print(f"- {pcn_code}")
+        print(zpa_not_in_zones)
+        ANOMALY_COUNT.inc(len(zpa_not_in_zones))
+
 
     return zpa_in_zones, zpa_not_in_zones
 
@@ -208,7 +237,9 @@ async def verify_PBR_EL(pb_gdf):
     for i, row in filtered_pbs.iterrows():
         if row['pcn_ftth'] > 3:
             invalid_pbr.append(row['pcn_code'])
+            PBR_EL_EXCESS.labels(pcn_code=row['pcn_code']).set(row['pcn_ftth'])
     if invalid_pbr:
+        ANOMALY_COUNT.inc(len(invalid_pbr))
         print("Les PBRs doivent être associés max à 3EL:")
         for pbr in invalid_pbr:
             print(f"- {pbr}")
@@ -220,52 +251,62 @@ async def singleEL(pb_gdf):
             pb_filtered = pb_gdf[pb_gdf['pcn_ftth'] == 1]
             if not pb_filtered.empty:
                 pcn_codes = pb_filtered['pcn_code'].tolist()
+                for code in pcn_codes:
+                    PB_SINGLE_EL.labels(pcn_code=code).set(1)
+                ANOMALY_COUNT.inc(len(pcn_codes))
                 print(f"PB(s) à 1EL détecté(s) pcn_code: {pcn_codes}")
         else:
             print(f"Les colonnes nécessaires 'pcn_ftth' et 'pcn_code' ne sont pas présentes dans le Shapefile.")
     except Exception as e:
         print(f"Erreur lors de la vérification des pb à 1EL dans le shapefile : {e}")
 
-import pandas as pd
-import re
-
 #Table attributaire du PA
 
 async def verify_pcn_code_pa(pa_gdf, zpa_gdf):
-    missing_pcn_code = pa_gdf['pcn_code'].isna() | (pa_gdf['pcn_code'] == '')
-    if missing_pcn_code.any():
-        print("La colonne pcn_code contient des valeurs manquantes dans la table attributaire de PA")
-        return False
-    
-    invalid_pcn_code = []
+    missing_pcn_codes = []
+    invalid_pcn_codes = []
 
     for i, row in pa_gdf.iterrows():
         pa_geometry = row['geometry']
         pa_pcn_code = row['pcn_code']
-        
+
+        if pd.isna(pa_pcn_code) or pa_pcn_code == '':
+            print(f"Ligne {i} : Valeur manquante dans la colonne 'pcn_code'")
+            missing_pcn_codes.append(i)
+            MISSING_PCN_CODE_PA.inc() 
+            ANOMALY_COUNT.inc()
+            continue
+
         zpa_intersections = zpa_gdf[zpa_gdf.intersects(pa_geometry)]
-        
-        intersecting_pcn_codes = zpa_intersections['pcn_code'].tolist()
-        
-        expected_pcn_code = ', '.join(intersecting_pcn_codes)
-        
-        if pa_pcn_code != expected_pcn_code:
-            invalid_pcn_code.append(row['pcn_code'])
-            print(f"PA {expected_pcn_code} a pcn_code incorrecte: {row['pcn_code']}")
-    
-    return invalid_pcn_code
+        intersecting_pcn_codes = zpa_intersections['pcn_code'].dropna().tolist()
+
+        if pa_pcn_code not in intersecting_pcn_codes:
+            corrected_pcn_code = intersecting_pcn_codes[0] if intersecting_pcn_codes else 'N/A'
+            print(f"Ligne {i} : 'pcn_code' incorrect : {pa_pcn_code}, attendu dans {intersecting_pcn_codes}")
+            invalid_pcn_codes.append(i)
+            INVALID_PCN_CODE_PA.labels(pcn_code=pa_pcn_code, expected_pcn_code=corrected_pcn_code).set(1)
+            ANOMALY_COUNT.inc()
+
+    return {
+        "missing_pcn_codes": missing_pcn_codes,
+        "invalid_pcn_codes": invalid_pcn_codes
+    }
 
 async def verify_pcn_cb_ent_pa(pa_gdf, cb_di_gdf):
     missing_pcn_cb_ent = pa_gdf['pcn_cb_ent'].isna() | (pa_gdf['pcn_cb_ent'] == '')
+    num_missing_pcn_cb_ent = missing_pcn_cb_ent.sum()
     
-    if missing_pcn_cb_ent.any():
-        print("La colonne pcn_cb_ent contient une/des valeurs manquantes dans la table attributaire de PA")
-        return False
+    if num_missing_pcn_cb_ent > 0:
+        print(f"La colonne pcn_cb_ent contient {num_missing_pcn_cb_ent} valeurs manquantes dans la table attributaire de PA")
+        MISSING_PCN_CB_ENT_PA.inc(num_missing_pcn_cb_ent)
+        ANOMALY_COUNT.inc(num_missing_pcn_cb_ent)
+    
     invalid_pcn_cb_ent = []
 
     for i, row in pa_gdf.iterrows():
         pa_geometry = row['geometry']
-        pa_pcn_cb_ent = row['pcn_cb_ent']
+        pa_pcn_cb_ent_ex = row['pcn_cb_ent']
+        
         def intersects_with_pa(x):
             boundary = x.geometry.boundary
             if boundary.geom_type == 'MultiPoint':
@@ -282,12 +323,13 @@ async def verify_pcn_cb_ent_pa(pa_gdf, cb_di_gdf):
             continue
         
         cb_capafo_values = cb_intersections['cb_capafo'].values
-        
         max_cb_capafo = max(cb_capafo_values)
         
-        if pa_pcn_cb_ent != max_cb_capafo:
+        if pa_pcn_cb_ent_ex != max_cb_capafo:
             invalid_pcn_cb_ent.append(row['pcn_code'])
-            print(f"PA {row['pcn_code']} has pcn_cb_ent : {pa_pcn_cb_ent} which does not match the maximum cb_capafo value: {max_cb_capafo}.")
+            INVALID_PCN_CB_ENT_PA.labels(pcn_code=row['pcn_code'], pcn_cb_ent_pa=pa_pcn_cb_ent_ex, expected_pcn_cb_ent_pa=max_cb_capafo).set(1)
+            ANOMALY_COUNT.inc()
+            print(f"PA {row['pcn_code']} has pcn_cb_ent : {pa_pcn_cb_ent_ex} which does not match the maximum cb_capafo value: {max_cb_capafo}.")
     
     return invalid_pcn_cb_ent
 
@@ -520,7 +562,7 @@ def verify_pcn_sro(zpa_gdf, zsro_gdf, type):
     invalid_codes = zpa_gdf.loc[mismatch_mask, 'pcn_sro'].tolist()
 
     if invalid_codes:
-        print(f"{type} a un (des) 'pcn_sro' incorrecte(s) :")
+        print(f"{type} a un (des) 'pcn_sro' incorrecte(s) :")
         for code in invalid_codes:
             print(f"  - {code}")
 
