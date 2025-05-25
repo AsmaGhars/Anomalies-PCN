@@ -1,5 +1,8 @@
 from flask import Blueprint, request, jsonify
 import os
+import yaml
+import requests
+
 from backend.config import TEMP_DIR
 from backend.scripts.extract_zip import extract_zip
 from backend.scripts.load_data import load_data
@@ -8,9 +11,36 @@ from backend.scripts.verify_di import *
 from backend.scripts.verify import *
 import aiofiles
 from ..metrics import *
-
+ALERTMANAGER_CONFIG_PATH = r"C:/prometheus/alertmanager.yml"
+ALERTMANAGER_RELOAD_URL = "http://localhost:9093/-/reload"  
 
 upload_blueprint = Blueprint('upload', __name__)
+@upload_blueprint.route('/save-email', methods=['POST'])
+def save_email():
+    data = request.get_json()
+    email = data.get('email')
+
+    try:
+        with open(ALERTMANAGER_CONFIG_PATH, 'r') as file:
+            config = yaml.safe_load(file)
+
+        for receiver in config.get('receivers', []):
+            if receiver.get('name') == 'team-email':
+                receiver['email_configs'][0]['to'] = email
+
+        with open(ALERTMANAGER_CONFIG_PATH, 'w') as file:
+            yaml.safe_dump(config, file)
+
+        reload_response = requests.post(ALERTMANAGER_RELOAD_URL)
+        if reload_response.status_code != 200:
+            print(f"Erreur lors du reload Alertmanager: {reload_response.text}")
+            return jsonify({"status": "error", "message": "Reload failed"}), 500
+
+        return jsonify({"status": "success", "updated_email": email}), 200
+
+    except Exception as e:
+        print(f"Erreur lors de save-email : {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @upload_blueprint.route('/upload', methods=['POST'])
 async def upload_file():

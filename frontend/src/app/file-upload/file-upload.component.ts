@@ -4,7 +4,7 @@ import { Router } from '@angular/router';
 @Component({
   selector: 'app-file-upload',
   templateUrl: './file-upload.component.html',
-  styleUrls: ['./file-upload.component.css']
+  styleUrls: ['./file-upload.component.css'],
 })
 export class FileUploadComponent {
   choice: string | null = null;
@@ -61,21 +61,22 @@ export class FileUploadComponent {
 
       fetch('http://localhost:5000/upload', {
         method: 'POST',
-        body: formData
+        body: formData,
       })
-        .then(response => {
+        .then((response) => {
           if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
           }
           return response.json();
         })
-        .then(data => {
+        .then((data) => {
           console.log(data);
           this.uploadMessage = 'File uploaded and analyzed successfully!';
           this.isLoading = false;
-          window.location.href = 'http://localhost:3000/d/f7ea2867-cf23-4994-bf13-e4adcfc96234/new-dashboard?orgId=1&from=now-6h&to=now&timezone=browser';
+          window.location.href =
+            'http://localhost:3000/d/bc71b594-d3c7-42d6-acfb-ea226470477f/new-dashboard?orgId=1&from=now-6h&to=now&timezone=browser&showCategory=Repeat%20options';
         })
-        .catch(error => {
+        .catch((error) => {
           console.error('Error:', error);
           this.uploadMessage = 'Error uploading file. ' + error.message;
           this.isLoading = false;
