@@ -1,9 +1,10 @@
 import geopandas as gpd
-from shapely.geometry import  LineString
+from shapely.geometry import  LineString, MultiPolygon, Polygon
 from shapely import wkt
 import pandas as pd
-import re
+import re, os
 from ..metrics import *
+
 def reset_metrics():
     print("Resetting all metrics...") 
     ANOMALY_COUNT.set(0)
@@ -116,8 +117,9 @@ async def verify_length_D1(cb_di_gdf):
     return invalid_cbs
 
 async def verify_no_overlap(pa_gdf: gpd.GeoDataFrame, support_gdf: gpd.GeoDataFrame):
-  
     invalid = []
+    rows_to_export = []
+
     try:
         enedis = support_gdf[support_gdf['pt_prop'].str.upper() == 'ENEDIS']
         overlaps = gpd.overlay(pa_gdf, enedis, how='intersection')
@@ -126,10 +128,26 @@ async def verify_no_overlap(pa_gdf: gpd.GeoDataFrame, support_gdf: gpd.GeoDataFr
             code = row['pcn_code']
             PA_ON_ENEDIS_SUPPORT.labels(pcn_code=code).set(1)
             invalid.append(code)
+            rows_to_export.append(row)
 
         if invalid:
             ANOMALY_COUNT.inc(len(invalid))
             print(f"Interdit d'avoir des PA sur des appuis ENEDIS : {invalid}")
+
+            # Exportation de la couche des anomalies
+            export_gdf = gpd.GeoDataFrame(rows_to_export, crs=pa_gdf.crs)
+
+            downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+            os.makedirs(downloads, exist_ok=True)
+
+            shp_path = os.path.join(downloads, "pa_on_enedis_support.shp")
+            gpkg_path = os.path.join(downloads, "pa_on_enedis_support.gpkg")
+
+            export_gdf.to_file(shp_path, driver='ESRI Shapefile', encoding='UTF-8')
+            print(f"Shapefile exporté dans : {shp_path}")
+
+            export_gdf.to_file(gpkg_path, layer="pa_on_enedis_support", driver='GPKG')
+            print(f"GeoPackage exporté dans : {gpkg_path}")
 
     except Exception as e:
         print(f"Erreur lors de la vérification de la superposition : {e}")
@@ -139,31 +157,39 @@ async def verify_no_overlap(pa_gdf: gpd.GeoDataFrame, support_gdf: gpd.GeoDataFr
 async def verify_zpb_in_zonepa(zpbo_gdf, zpa_gdf):
     if zpbo_gdf.crs != zpa_gdf.crs:
         zpbo_gdf = zpbo_gdf.to_crs(zpa_gdf.crs)
-
-    zpbo_gdf = convert_geometries_to_wkt(zpbo_gdf)
     zpa_gdf = convert_geometries_to_wkt(zpa_gdf)
+    zpa_dict = {row['pcn_code']: wkt.loads(row['wkt']) for _, row in zpa_gdf.iterrows()}
 
-    zpa = {row['pcn_code']: wkt.loads(row['wkt']) for idx, row in zpa_gdf.iterrows()}  
-    zpb_in_zones = []
-    zpb_not_in_zones = []
-    
-    for idx, row in zpbo_gdf.iterrows():
-        zpb_geom = wkt.loads(row['wkt'])
-        pcn_code = row['pcn_code']  
-        zpa_geom = zpa.get(row['pcn_zpa'])
-        
-        if zpa_geom and zpa_geom.contains(zpb_geom):
-            zpb_in_zones.append(pcn_code)
-        else:
-            zpb_not_in_zones.append(pcn_code)
-            ZPBO_NOT_IN_ZPA.labels(zone_type='ZPA', code=pcn_code).set(1)
-
-    if zpb_not_in_zones:
-        print("Les ZPBO suivants n'appartiennent pas à leurs ZPA assignées :")
-        print(zpb_not_in_zones)
-        ANOMALY_COUNT.inc(len(zpb_not_in_zones))
-
-    return zpb_in_zones, zpb_not_in_zones
+    records = []
+    for _, row in zpbo_gdf.iterrows():
+        geom = row['geometry'] if 'geometry' in row else wkt.loads(row['wkt'])
+        code = row['pcn_code']
+        zpa_geom = zpa_dict.get(row['pcn_zpa'])
+        if zpa_geom is None:
+            continue
+        diff = geom.difference(zpa_geom)
+        if diff.is_empty:
+            continue
+        parts = []
+        if isinstance(diff, Polygon):
+            parts = [diff]
+        elif isinstance(diff, MultiPolygon):
+            parts = list(diff.geoms)
+        for part in parts:
+            records.append({'pcn_code': code, 'wkt': part.wkt})
+            ZPBO_NOT_IN_ZPA.labels(zone_type='ZPA', code=code).set(1)
+    if not records:
+        print("Aucune partie de ZPBO n’est hors de ZPA.")
+        return []
+    export_gdf = gpd.GeoDataFrame([
+        {'pcn_code': r['pcn_code'], 'geometry': wkt.loads(r['wkt'])} for r in records
+    ], crs=zpbo_gdf.crs)
+    downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+    os.makedirs(downloads, exist_ok=True)
+    export_gdf.to_file(os.path.join(downloads, "zpb_not_in_zpa.shp"), driver='ESRI Shapefile', encoding='UTF-8', engine='fiona')
+    export_gdf.to_file(os.path.join(downloads, "zpb_not_in_zpa.gpkg"), layer="zpb_not_in_zpa", driver='GPKG')
+    ANOMALY_COUNT.inc(len(records))
+    return records
 
 async def verify_max_distance_between_supports(cm_gdf, support_gdf, max_distance=40):
     if cm_gdf.crs != support_gdf.crs:
@@ -209,27 +235,46 @@ async def verify_zpa_in_zonesro(zpa_gdf, zsro_gdf):
         zpa_gdf = zpa_gdf.to_crs(zsro_gdf.crs)
 
     zsro_geom = zsro_gdf.iloc[0]['geometry']
+    records = []
 
-    zpa_in_zones = []
-    zpa_not_in_zones = []
-
-    for idx, row in zpa_gdf.iterrows():
+    for _, row in zpa_gdf.iterrows():
         zpa_geom = row['geometry']
-        pcn_code = row['pcn_code']
+        code = row['pcn_code']
 
-        if zsro_geom.contains(zpa_geom):
-            zpa_in_zones.append(pcn_code)
-        else:
-            zpa_not_in_zones.append(pcn_code)
-            ZPA_NOT_IN_ZSRO.labels(zone_type='ZPA', code=pcn_code).set(1)
+        # Calculer la différence géométrique : partie de la ZPA hors ZSRO
+        diff = zpa_geom.difference(zsro_geom)
 
-    if zpa_not_in_zones:
-        print("Les ZPA suivants n'appartiennent pas entièrement à la zone ZSRO assignée :")
-        print(zpa_not_in_zones)
-        ANOMALY_COUNT.inc(len(zpa_not_in_zones))
+        if diff.is_empty:
+            continue
 
+        parts = []
+        if isinstance(diff, Polygon):
+            parts = [diff]
+        elif isinstance(diff, MultiPolygon):
+            parts = list(diff.geoms)
 
-    return zpa_in_zones, zpa_not_in_zones
+        for part in parts:
+            records.append({'pcn_code': code, 'wkt': part.wkt})
+            ZPA_NOT_IN_ZSRO.labels(zone_type='ZSRO', code=code).set(1)
+
+    if not records:
+        print("Toutes les ZPA sont entièrement contenues dans la ZSRO.")
+        return []
+
+    # Créer une GeoDataFrame pour les parties en dehors
+    export_gdf = gpd.GeoDataFrame([
+        {'pcn_code': r['pcn_code'], 'geometry': wkt.loads(r['wkt'])} for r in records
+    ], crs=zpa_gdf.crs)
+
+    # Sauvegarder les fichiers dans le dossier Téléchargements
+    downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+    os.makedirs(downloads, exist_ok=True)
+
+    export_gdf.to_file(os.path.join(downloads, "zpa_not_in_zsro.shp"), driver='ESRI Shapefile', encoding='UTF-8', engine='fiona')
+    export_gdf.to_file(os.path.join(downloads, "zpa_not_in_zsro.gpkg"), layer="zpa_not_in_zsro", driver='GPKG')
+
+    ANOMALY_COUNT.inc(len(records))
+    return records
 
 async def verify_PBR_EL(pb_gdf):
     filtered_pbs = pb_gdf[pb_gdf['pcn_pbtyp'].str.contains("PBR", case=False, na=False)]
